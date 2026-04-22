@@ -6,7 +6,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
+from fastapi.testclient import TestClient
+from base64 import b64encode
 from app.database import Base
+from app.models import TournamentPlan  # Import to register model with Base
+from app.config import settings
 
 
 # Test database URL
@@ -74,3 +78,104 @@ def db_session(test_db):
         session.rollback()
         # Close the session
         session.close()
+
+
+@pytest.fixture(scope="function")
+def client(test_db, monkeypatch):
+    """
+    Create a TestClient for FastAPI app with test database.
+    Uses dependency override to use test database.
+    """
+    # Import here to avoid circular imports
+    from app.main import app
+    from app import dependencies
+    from sqlalchemy.orm import sessionmaker
+    
+    # Create all tables before tests
+    Base.metadata.create_all(bind=test_db)
+    
+    # Create session factory for test database
+    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db)
+    
+    def override_get_db():
+        db = TestSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+    
+    # Override the get_db dependency using the function from dependencies module
+    app.dependency_overrides[dependencies.get_db] = override_get_db
+    
+    client = TestClient(app)
+    yield client
+    
+    # Clear overrides after test
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def auth_headers():
+    """
+    Provide valid HTTP Basic Auth headers for API authentication.
+    """
+    username = settings.API_USERNAME
+    password = "TrVOH5xHv8eIMr6b"  # Plain text password from .env
+    
+    credentials = b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {credentials}"}
+
+
+@pytest.fixture(scope="function")
+def invalid_auth_headers():
+    """
+    Provide invalid HTTP Basic Auth headers for testing 401 errors.
+    """
+    credentials = b64encode(b"invalid:wrongpassword").decode()
+    return {"Authorization": f"Basic {credentials}"}
+
+
+@pytest.fixture(scope="function")
+def sample_tournament_plan(db_session):
+    """
+    Create a sample tournament plan with icon for testing.
+    """
+    plan = TournamentPlan(
+        name="Sample Tournament Plan",
+        welcome_message="Welcome to the sample tournament!",
+        icon=b"sample_icon_binary_data"
+    )
+    db_session.add(plan)
+    db_session.commit()
+    db_session.refresh(plan)
+    return plan
+
+
+@pytest.fixture(scope="function")
+def sample_tournament_plans(db_session):
+    """
+    Create multiple sample tournament plans for testing listing functionality.
+    """
+    plans = [
+        TournamentPlan(
+            name="Tournament One",
+            welcome_message="Welcome to tournament one!",
+            icon=b"icon_one_data"
+        ),
+        TournamentPlan(
+            name="Tournament Two",
+            welcome_message="Welcome to tournament two!",
+            icon=b"icon_two_data"
+        ),
+        TournamentPlan(
+            name="Tournament Three",
+            welcome_message="Welcome to tournament three!",
+            icon=None
+        ),
+    ]
+    for plan in plans:
+        db_session.add(plan)
+    db_session.commit()
+    for plan in plans:
+        db_session.refresh(plan)
+    return plans
